@@ -180,8 +180,20 @@ def render_charts_tab(ticker: str, comparisons, units: str | None = None) -> Non
         divisor, unit_label = DOLLAR_UNITS[units][0], f"$ {units.lower()}"
     else:
         divisor, unit_label = pick_dollar_unit(df["Value"].tolist())
+    suffix = {1e9: "B", 1e6: "M", 1e3: "K"}.get(divisor, "")
+    decimals = 2 if suffix == "B" else 1
+
+    def fmt_scaled(value) -> str:
+        # "$1,550.0M" / "-$0.18B" — a pre-formatted string for the hover
+        # tooltip, since Altair's number formats can't append a unit suffix.
+        if value is None or pd.isna(value):
+            return "—"
+        scaled = value / divisor
+        return f"{'-' if scaled < 0 else ''}${abs(scaled):,.{decimals}f}{suffix}"
+
     values_df = df.dropna(subset=["Value"]).copy()
     values_df["Scaled"] = values_df["Value"] / divisor
+    values_df["Display"] = values_df["Value"].map(fmt_scaled)
 
     if values_df.empty:
         st.warning(
@@ -196,7 +208,7 @@ def render_charts_tab(ticker: str, comparisons, units: str | None = None) -> Non
         tooltip = [
             alt.Tooltip("Quarter:N"),
             alt.Tooltip("Metric:N"),
-            alt.Tooltip("Value:Q", title="Value ($)", format="$,.0f"),
+            alt.Tooltip("Display:N", title=f"Value ({unit_label})"),
             alt.Tooltip("QoQ %:Q", format=".1f"),
             alt.Tooltip("YoY %:Q", format=".1f"),
         ]
@@ -295,7 +307,9 @@ def render_charts_tab(ticker: str, comparisons, units: str | None = None) -> Non
             if col.endswith("%"):
                 table_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
             else:
-                table_config[col] = st.column_config.NumberColumn(col, format="dollar")
+                # Same millions/billions scaling as the chart axis and tooltips.
+                table[col] = table[col] / divisor
+                table_config[col] = st.column_config.NumberColumn(col, format=f"$%.{decimals}f{suffix}")
         st.dataframe(table, width="stretch", column_config=table_config, hide_index=True)
 
 

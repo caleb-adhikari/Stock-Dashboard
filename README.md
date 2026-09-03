@@ -1,8 +1,10 @@
 # Earnings Screener
 
-> **This project was vibecoded** — built by talking through requirements
+> **Work in progress — a personal project, and vibecoded.** Built by
+> talking through requirements
 > with Claude and having it write, test, and explain the code, rather than
-> hand-written line by line. The design decisions, data source choices,
+> hand-written line by line; features are added as I think of them, so
+> expect rough edges. The design decisions, data source choices,
 > and edge cases (see "Known limitations" below) were worked through in
 > that conversation; nothing here has been independently audited by a
 > professional developer. Treat it as a personal tool and a learning
@@ -327,40 +329,15 @@ fallback list the way revenue has. Rather than guess and risk showing a
 wrong debt figure, those ratios are left out entirely (see "Known
 limitations").
 
-## Publishing this to GitHub
+## What's (deliberately) not in this repo
 
-Nothing in this repo needs to be scrubbed before making it public/private —
-the SEC EDGAR contact email is always supplied at runtime (an environment
-variable, a CLI flag, or the dashboard's sidebar box), never hardcoded into
-a file, and there are no other credentials or API keys anywhere in this
-project. `.gitignore` also excludes `.env` files and Streamlit's
-`secrets.toml` in case you add either later.
-
-To publish as a private repo, from a real Terminal window in this folder
-(not needed if you already know your way around `git`):
-
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-```
-
-Then either, if you have the GitHub CLI installed and are logged in
-(`gh auth status` to check):
-
-```bash
-gh repo create earnings-screener --private --source=. --remote=origin --push
-```
-
-...or, without `gh`: create a new **private** repository named
-`earnings-screener` at github.com/new (leave "Add a README"/".gitignore"
-unchecked, since this folder already has both), then:
-
-```bash
-git remote add origin https://github.com/<your-username>/earnings-screener.git
-git branch -M main
-git push -u origin main
-```
+Nothing here needs scrubbing before publishing: the SEC EDGAR contact
+email is always supplied at runtime (an environment variable, a CLI flag,
+or the dashboard's sidebar box), never hardcoded into a file, and there
+are no credentials or API keys anywhere in this project. `.gitignore`
+also excludes `.env` files, Streamlit's `secrets.toml`, and your personal
+`data/watchlist.json` (it changes every time you add a ticker, and it's
+yours, not the project's).
 
 ## Known limitations
 

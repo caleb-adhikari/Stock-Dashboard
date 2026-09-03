@@ -18,3 +18,6 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Your personal watchlist — created by the dashboard, not part of the project
+data/watchlist.json
