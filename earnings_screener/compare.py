@@ -22,6 +22,22 @@ def _pct_change(new: float | None, old: float | None) -> float | None:
     return (new - old) / abs(old) * 100
 
 
+# QoQ/YoY lookups: "previous quarter" and "same quarter last year". These
+# assume standard fiscal quarter numbering (Q1-Q4); they will not correctly
+# find "previous quarter" across a fiscal year boundary if a quarter is
+# missing from the data. Module-level (not nested in build_comparisons) so
+# charting.py can compute growth for any metric using the exact same rules.
+def prior_quarter_key(key: QuarterKey) -> QuarterKey:
+    if key.fiscal_period == "Q1":
+        return QuarterKey(key.fiscal_year - 1, "Q4")
+    q_num = int(key.fiscal_period[-1])
+    return QuarterKey(key.fiscal_year, f"Q{q_num - 1}")
+
+
+def year_ago_key(key: QuarterKey) -> QuarterKey:
+    return QuarterKey(key.fiscal_year - 1, key.fiscal_period)
+
+
 def build_comparisons(
     gaap_quarters: list[GaapQuarter],
     non_gaap_quarters: list[NonGaapQuarter],
@@ -45,19 +61,6 @@ def build_comparisons(
     gaap_by_key = {q.key: q for q in gaap_quarters}
     non_gaap_by_key = {q.key: q for q in non_gaap_quarters}
     all_keys = sorted(set(gaap_by_key) | set(non_gaap_by_key), reverse=True)
-
-    # Index GAAP quarters by key for QoQ/YoY lookups (previous quarter, same
-    # quarter last year). This assumes standard fiscal quarter numbering
-    # (Q1-Q4); it will not correctly find "previous quarter" across a fiscal
-    # year boundary if a quarter is missing from the data.
-    def prior_quarter_key(key: QuarterKey) -> QuarterKey | None:
-        if key.fiscal_period == "Q1":
-            return QuarterKey(key.fiscal_year - 1, "Q4")
-        q_num = int(key.fiscal_period[-1])
-        return QuarterKey(key.fiscal_year, f"Q{q_num - 1}")
-
-    def year_ago_key(key: QuarterKey) -> QuarterKey:
-        return QuarterKey(key.fiscal_year - 1, key.fiscal_period)
 
     comparisons = []
     for key in all_keys:

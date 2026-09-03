@@ -63,7 +63,76 @@ def test_ratios_tab_renders_after_picking_a_ticker_and_ratios():
         assert not at.exception, f"dashboard raised after selecting ratios: {at.exception}"
 
 
+def test_charts_tab_renders_with_seeded_ticker():
+    """With the live GAAP fetch failing (no network), the Charts tab only has
+    non-GAAP quarters to work with — every GAAP metric is None. This proves
+    the "nothing to plot for these metrics" path and the RPO-only path both
+    render without raising."""
+    at = _run_app()
+    at.sidebar.text_input[0].set_value("test@example.com").run()
+    at.sidebar.text_input[1].set_value("SNOW").run()
+    assert not at.exception, f"dashboard raised after entering ticker/email: {at.exception}"
+
+    chart_picker = next((m for m in at.multiselect if m.key == "chart_metrics"), None)
+    assert chart_picker is not None, "Charts tab multiselect not found"
+    chart_picker.set_value(["revenue", "rpo"]).run()
+    assert not at.exception, f"dashboard raised after selecting chart metrics: {at.exception}"
+
+    chart_picker.set_value([]).run()
+    assert not at.exception, f"dashboard raised with no chart metrics selected: {at.exception}"
+
+
+# A tiny standalone Streamlit script that calls render_charts_tab() directly
+# with synthetic quarters, so the Altair chart-building code runs against
+# real numbers (bars AND lines, QoQ/YoY/Both) without any network. Importing
+# dashboard.py executes its top-level page code too, which is harmless here.
+_CHARTS_SCRIPT = f"""
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+import streamlit as st
+from dashboard import render_charts_tab
+from earnings_screener.compare import build_comparisons
+from earnings_screener.models import GaapQuarter, NonGaapQuarter, QuarterKey
+
+def g(fy, p, rev, gp, oi, ni):
+    return GaapQuarter("TEST", QuarterKey(fy, p), "", f"{{fy}}-01-31", revenue=rev, gross_profit=gp,
+                       operating_income=oi, net_income=ni, stock_based_comp=rev * 0.3)
+
+comps = build_comparisons(
+    [g(2026, "Q1", 1.0e9, 0.7e9, -0.1e9, -0.05e9), g(2026, "Q2", 1.1e9, 0.77e9, -0.05e9, -0.02e9),
+     g(2026, "Q3", 1.2e9, 0.84e9, 0.0, 0.01e9), g(2026, "Q4", 1.3e9, 0.91e9, 0.05e9, 0.04e9),
+     g(2027, "Q1", 1.5e9, 1.05e9, 0.15e9, 0.12e9)],
+    [NonGaapQuarter("TEST", QuarterKey(2026, "Q1"), rpo=5e9), NonGaapQuarter("TEST", QuarterKey(2027, "Q1"), rpo=6.5e9)],
+)
+render_charts_tab("TEST", comps)
+"""
+
+
+def test_charts_tab_builds_altair_charts_from_synthetic_data():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(_CHARTS_SCRIPT, default_timeout=30)
+    at.run()
+    assert not at.exception, f"charts tab raised on synthetic data: {at.exception}"
+    # Two charts by default: quarterly values + YoY growth.
+    assert len(at.get("vega_lite_chart")) == 2
+
+    picker = next(m for m in at.multiselect if m.key == "chart_metrics")
+    picker.set_value(["revenue", "cost_of_revenue", "operating_expenses", "rpo"]).run()
+    assert not at.exception
+
+    for style in ("Lines", "Bars"):
+        next(r for r in at.radio if r.key == "chart_value_style").set_value(style).run()
+        assert not at.exception, f"charts tab raised with value style {style}: {at.exception}"
+    for basis in ("QoQ", "Both", "YoY"):
+        next(r for r in at.radio if r.key == "chart_growth_basis").set_value(basis).run()
+        assert not at.exception, f"charts tab raised with growth basis {basis}: {at.exception}"
+        assert len(at.get("vega_lite_chart")) == 2
+
+
 if __name__ == "__main__":
     test_dashboard_loads_without_exceptions()
     test_ratios_tab_renders_after_picking_a_ticker_and_ratios()
+    test_charts_tab_renders_with_seeded_ticker()
+    test_charts_tab_builds_altair_charts_from_synthetic_data()
     print("Dashboard smoke tests passed.")

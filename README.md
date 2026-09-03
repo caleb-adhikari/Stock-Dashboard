@@ -61,6 +61,7 @@ earnings_screener/
     cross_company.py        # lines up several companies' latest quarters side by side
     pipeline.py             # "given a ticker, fetch+merge its data" — shared by cli.py and dashboard.py
     ratios.py                # the financial ratio catalog + TTM math for the dashboard's Ratios dropdown
+    charting.py              # the chartable-metric catalog (revenue, expense lines, ...) + per-metric QoQ/YoY, for the Charts tab
     dataframes.py            # converts the typed objects above into pandas DataFrames (dashboard only)
     watchlist.py             # load/save a persisted list of tickers (JSON file), used by the Watchlist tab
     cli.py                  # `python -m earnings_screener TICKER`
@@ -72,6 +73,7 @@ tests/
     test_sec_edgar_parsing.py   # EDGAR quarter-filtering/dedup logic (see below)
     test_cross_company.py        # snapshot-building + DataFrame conversion
     test_ratios.py                # TTM math + individual ratio formulas (see "How the ratio dropdown works")
+    test_charting.py              # derived expense lines + per-metric growth math (see "How the Charts tab works")
     test_stock_prices.py         # price-history combine/normalize helpers
     test_watchlist.py            # watchlist load/save round-trip
     test_dashboard_smoke.py      # headless Streamlit AppTest — dashboard.py runs without crashing
@@ -79,8 +81,8 @@ tests/
 
 **Why it's split up this way — the dependency direction matters:**
 `models.py`, `sources/sec_edgar.py`, `sources/manual_nongaap.py`,
-`compare.py`, `cross_company.py`, `pipeline.py`, and `ratios.py` use
-nothing but the standard library. `dataframes.py`, `sources/stock_prices.py`,
+`compare.py`, `cross_company.py`, `pipeline.py`, `ratios.py`, and
+`charting.py` use nothing but the standard library. `dataframes.py`, `sources/stock_prices.py`,
 and `dashboard.py` are the only files that know about `pandas`/`yfinance`/
 `streamlit`. That means the core pipeline stays usable from a bare Python
 install (a script, a notebook, a cron job, a different UI entirely) even
@@ -164,10 +166,16 @@ reasoning.
 `streamlit run dashboard.py` opens a browser tab with two top-level tabs:
 
 **Earnings Screener** — everything from before, now nested under one tab,
-with four sections inside it:
+with six sections inside it:
 
 - **Quarterly Detail** — the GAAP vs. non-GAAP table and charts for one
   ticker (same data as the CLI, browsable/sortable instead of printed).
+- **Charts** — pick any combination of quarterly metrics (revenue, gross
+  profit, cost of revenue, operating expenses, total costs, operating
+  income, net income, stock-based comp, RPO, product revenue) and see them
+  plotted quarter by quarter as grouped bars or lines, with a second chart
+  of each one's QoQ and/or YoY growth %, and an expandable table of the
+  numbers behind both. See "How the Charts tab works" below.
 - **QoQ vs YoY** — growth-rate charts plus the same divergence flags the
   CLI prints (e.g. "RPO fell X% QoQ while still up Y% YoY").
 - **Stock Price** — a price chart for the primary ticker (and any
@@ -204,6 +212,50 @@ lives in its own function (`render_earnings_screener_tab` /
 one tab bail out early (no email entered yet, no watchlist tickers yet)
 via a normal `return` without blanking out the *other* tab too, which is
 what would happen with Streamlit's `st.stop()`.
+
+## How the Charts tab works
+
+`earnings_screener/charting.py` is built the same way as `ratios.py`: a
+catalog (`CHART_METRIC_CATALOG`) of small definitions — label, category,
+description, and a `compute` function that pulls one number out of a
+`QuarterComparison` — and one function, `compute_chart_rows()`, that
+turns a list of quarters into plain rows of (quarter, metric, value,
+QoQ %, YoY %). It's stdlib-only, so it's testable offline
+(`tests/test_charting.py`) and usable from a plain script.
+
+**Where the "expense" lines come from:** SEC EDGAR has no single reliable
+XBRL tag for "total expenses" — companies break costs out very
+differently, and tags like `OperatingExpenses` exist for some filers and
+not others. But the three subtotals the GAAP fetcher already pulls
+(revenue, gross profit, operating income) pin the expense lines down by
+subtraction, exactly the way they sit on the income statement:
+
+```
+cost of revenue     = revenue      − gross profit
+operating expenses  = gross profit − operating income    (R&D + S&M + G&A)
+total costs         = revenue      − operating income
+```
+
+So the derived figures match what the company reported, with one caveat:
+if a filer skips the `GrossProfit` tag, cost of revenue and operating
+expenses show blank for that quarter (total costs still works, since it
+only needs revenue and operating income).
+
+**Growth rates:** QoQ and YoY % are computed for every metric using the
+same prior-quarter / year-ago lookups and the same rule as `compare.py`
+(blank if either side is missing or the base is zero). One thing to keep
+in mind for loss-making companies: the formula divides by the *absolute*
+value of the old figure, so a net loss shrinking from −$50M to −$25M reads
+as **+50%** ("the loss improved by half"), not −50%. YoY needs the same
+quarter from the prior year in the loaded data, so with the sidebar's
+"Quarters of GAAP history" at its minimum of 4 you'll only get YoY for
+the newest quarter or two — raise it to see more.
+
+**Why dollar values and growth are two charts, not one chart with two
+y-axes:** a dual-axis chart lets you make any two lines look correlated
+(or not) purely by fiddling with the two scales, which makes it the one
+chart type that's easy to mislead yourself with. Two stacked charts that
+share the same x-axis give you the same information without that trap.
 
 ## How the ratio dropdown works
 

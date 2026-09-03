@@ -49,6 +49,13 @@ import os
 import pandas as pd
 import streamlit as st
 
+from earnings_screener.charting import (
+    CHART_METRIC_BY_KEY,
+    CHART_METRIC_CATALOG,
+    DEFAULT_CHART_METRIC_KEYS,
+    compute_chart_rows,
+    pick_dollar_unit,
+)
 from earnings_screener.compare import find_divergences
 from earnings_screener.cross_company import build_snapshot_table
 from earnings_screener.dataframes import comparisons_to_dataframe, ratio_rows_to_dataframe, snapshots_to_dataframe
@@ -104,6 +111,183 @@ def cached_latest_price(ticker: str):
 
 
 # ---------------------------------------------------------------------------
+# Charts sub-tab (inside the Earnings Screener tab)
+# ---------------------------------------------------------------------------
+
+
+def render_charts_tab(ticker: str, comparisons) -> None:
+    """
+    Pick any of the quarterly metrics in charting.CHART_METRIC_CATALOG
+    (revenue, the expense lines, net income, RPO, ...) and see them plotted
+    quarter by quarter, alongside their QoQ / YoY growth rates.
+
+    Dollar values and growth percentages are deliberately TWO charts, not
+    one chart with two y-axes: a dual-axis chart lets you make any two
+    lines look correlated (or not) just by fiddling with the scales, so
+    it's the one chart type that's easy to mislead yourself with.
+    """
+    import altair as alt
+
+    st.subheader(f"{ticker} — quarterly trends")
+    st.caption(
+        "Plot the income statement over time. Expense lines are derived from the reported subtotals "
+        "(cost of revenue = revenue − gross profit; operating expenses = gross profit − operating income) — "
+        "see charting.py for why."
+    )
+
+    control_cols = st.columns([3, 1, 1])
+    with control_cols[0]:
+        selected_keys = st.multiselect(
+            "Metrics to chart",
+            options=[m.key for m in CHART_METRIC_CATALOG],
+            default=DEFAULT_CHART_METRIC_KEYS,
+            format_func=lambda key: CHART_METRIC_BY_KEY[key].label,
+            help="\n".join(f"**{m.label}** — {m.description}" for m in CHART_METRIC_CATALOG),
+            key="chart_metrics",
+        )
+    with control_cols[1]:
+        value_style = st.radio("Values as", ["Bars", "Lines"], horizontal=True, key="chart_value_style")
+    with control_cols[2]:
+        growth_basis = st.radio("Growth", ["YoY", "QoQ", "Both"], horizontal=True, key="chart_growth_basis")
+
+    if not selected_keys:
+        st.info("Pick one or more metrics above.")
+        return
+
+    rows = compute_chart_rows(comparisons, selected_keys)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No quarterly data to chart yet.")
+        return
+
+    # Both axes need an explicit order, otherwise Altair sorts "Q1 FY2027"
+    # alphabetically (which puts FY2027 before FY2026's Q2...). Rows already
+    # come back chronological from compute_chart_rows, so just dedupe.
+    quarter_order = list(dict.fromkeys(df["Quarter"]))
+    metric_order = [CHART_METRIC_BY_KEY[k].label for k in selected_keys]
+
+    # -- Dollar values ---------------------------------------------------------
+    divisor, unit_label = pick_dollar_unit(df["Value"].tolist())
+    values_df = df.dropna(subset=["Value"]).copy()
+    values_df["Scaled"] = values_df["Value"] / divisor
+
+    if values_df.empty:
+        st.warning(
+            "None of the selected metrics have data for these quarters. "
+            "GAAP lines need a successful SEC EDGAR fetch; non-GAAP lines need entries in data/non_gaap/."
+        )
+    else:
+        st.markdown(f"**Quarterly values** ({unit_label})")
+        x = alt.X("Quarter:N", sort=quarter_order, title=None, axis=alt.Axis(labelAngle=0))
+        y = alt.Y("Scaled:Q", title=unit_label, axis=alt.Axis(format="~s"))
+        color = alt.Color("Metric:N", sort=metric_order, legend=alt.Legend(title=None, orient="top"))
+        tooltip = [
+            alt.Tooltip("Quarter:N"),
+            alt.Tooltip("Metric:N"),
+            alt.Tooltip("Value:Q", title="Value ($)", format="$,.0f"),
+            alt.Tooltip("QoQ %:Q", format=".1f"),
+            alt.Tooltip("YoY %:Q", format=".1f"),
+        ]
+        if value_style == "Bars":
+            marks = (
+                alt.Chart(values_df)
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                .encode(x=x, y=y, color=color, xOffset=alt.XOffset("Metric:N", sort=metric_order), tooltip=tooltip)
+            )
+        else:
+            marks = (
+                alt.Chart(values_df)
+                .mark_line(point=alt.OverlayMarkDef(size=60), strokeWidth=2)
+                .encode(x=x, y=y, color=color, tooltip=tooltip)
+            )
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeWidth=1).encode(y="y:Q")
+        st.altair_chart((marks + zero).properties(height=340), width="stretch")
+
+    # -- Growth rates -----------------------------------------------------------
+    growth_cols = {"YoY": ["YoY %"], "QoQ": ["QoQ %"], "Both": ["QoQ %", "YoY %"]}[growth_basis]
+    growth_df = df.melt(
+        id_vars=["Quarter", "Metric"],
+        value_vars=growth_cols,
+        var_name="Basis",
+        value_name="Growth %",
+    ).dropna(subset=["Growth %"])
+    growth_df["Basis"] = growth_df["Basis"].str.replace(" %", "", regex=False)
+
+    if growth_df.empty:
+        st.caption(
+            f"No {growth_basis} growth to show yet — YoY needs the same quarter a year earlier in the data "
+            "(try raising 'Quarters of GAAP history' in the sidebar); QoQ needs the previous quarter."
+        )
+    else:
+        st.markdown(f"**Growth ({growth_basis})** — % change per quarter")
+        growth_encoding = dict(
+            # Pin the x-axis to every quarter in the data (not just the ones
+            # with a growth figure) so a single YoY point still sits in context.
+            x=alt.X(
+                "Quarter:N",
+                sort=quarter_order,
+                scale=alt.Scale(domain=quarter_order),
+                title=None,
+                axis=alt.Axis(labelAngle=0),
+            ),
+            y=alt.Y("Growth %:Q", title="% change", axis=alt.Axis(format=".0f")),
+            color=alt.Color("Metric:N", sort=metric_order, legend=alt.Legend(title=None, orient="top")),
+            tooltip=[
+                alt.Tooltip("Quarter:N"),
+                alt.Tooltip("Metric:N"),
+                alt.Tooltip("Basis:N"),
+                alt.Tooltip("Growth %:Q", format=".1f"),
+            ],
+        )
+        if growth_basis == "Both":
+            # Solid = YoY, dashed = QoQ, so the two bases for the same metric
+            # share a color but are still tellable apart.
+            growth_encoding["strokeDash"] = alt.StrokeDash(
+                "Basis:N",
+                sort=["YoY", "QoQ"],
+                legend=alt.Legend(title=None, orient="top"),
+            )
+        growth_lines = (
+            alt.Chart(growth_df)
+            .mark_line(point=alt.OverlayMarkDef(size=60), strokeWidth=2)
+            .encode(**growth_encoding)
+        )
+        zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeWidth=1).encode(y="y:Q")
+        st.altair_chart((growth_lines + zero).properties(height=300), width="stretch")
+        st.caption(
+            "Growth is computed as (new − old) / |old|, so a shrinking loss shows as positive growth "
+            "(e.g. net loss going from −\\$50M to −\\$25M reads as +50%)."
+        )
+
+    # -- The numbers behind the charts ---------------------------------------
+    with st.expander("Show data table"):
+        table = (
+            df.pivot(index="Quarter", columns="Metric", values=["Value", "QoQ %", "YoY %"])
+            .reindex(quarter_order[::-1])  # newest first, like the Quarterly Detail table
+        )
+        # Flatten the (measure, metric) column pairs to "Revenue", "Revenue QoQ %", ...
+        table.columns = [
+            metric if measure == "Value" else f"{metric} {measure}" for measure, metric in table.columns
+        ]
+        ordered_cols = [
+            col
+            for metric in metric_order
+            for col in (metric, f"{metric} QoQ %", f"{metric} YoY %")
+            if col in table.columns
+        ]
+        # If a metric is None for EVERY quarter, pivot() leaves that column as
+        # object dtype, which NumberColumn can't format — coerce to float.
+        table = table[ordered_cols].apply(pd.to_numeric).reset_index()
+        table_config = {}
+        for col in ordered_cols:
+            if col.endswith("%"):
+                table_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
+            else:
+                table_config[col] = st.column_config.NumberColumn(col, format="dollar")
+        st.dataframe(table, width="stretch", column_config=table_config, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
 # Earnings Screener tab
 # ---------------------------------------------------------------------------
 
@@ -146,8 +330,8 @@ def render_earnings_screener_tab(email: str) -> None:
     df_asc = comparisons_to_dataframe(result.comparisons, ascending=True)  # chronological, for charts
     df_table = df_asc.iloc[::-1]  # most-recent-first, for the table
 
-    tab_detail, tab_growth, tab_price, tab_compare, tab_ratios = st.tabs(
-        ["Quarterly Detail", "QoQ vs YoY", "Stock Price", "Compare Companies", "Ratios"]
+    tab_detail, tab_charts, tab_growth, tab_price, tab_compare, tab_ratios = st.tabs(
+        ["Quarterly Detail", "Charts", "QoQ vs YoY", "Stock Price", "Compare Companies", "Ratios"]
     )
 
     # -- Quarterly Detail --------------------------------------------------
@@ -189,6 +373,10 @@ def render_earnings_screener_tab(email: str) -> None:
         with col2:
             st.caption("Gap as % of revenue")
             st.bar_chart(df_asc.set_index("Quarter")[["Gap % of Revenue"]])
+
+    # -- Charts ---------------------------------------------------------------
+    with tab_charts:
+        render_charts_tab(primary_ticker, result.comparisons)
 
     # -- QoQ vs YoY ----------------------------------------------------------
     with tab_growth:
