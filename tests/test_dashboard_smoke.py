@@ -46,7 +46,6 @@ def test_ratios_tab_renders_after_picking_a_ticker_and_ratios():
     # even with the live GAAP fetch failing here for lack of network, the
     # comparisons list won't be empty and the Ratios tab has something to
     # iterate over).
-    at.sidebar.text_input(key=None)  # no-op touch to ensure sidebar widgets are indexed
     email_box = at.sidebar.text_input[0]
     email_box.set_value("test@example.com").run()
 
@@ -55,10 +54,22 @@ def test_ratios_tab_renders_after_picking_a_ticker_and_ratios():
 
     assert not at.exception, f"dashboard raised after entering ticker/email: {at.exception}"
 
+    # Flip through every basis (GAAP is the default) and both dollar units —
+    # each combination re-renders the Summary table, the Charts tab and the
+    # Compare table with different column sets, so this catches a typo'd
+    # column name in any of them.
+    basis_radio = at.sidebar.radio[0]
+    units_box = at.sidebar.selectbox[0]
+    for basis in ("GAAP", "Non-GAAP", "Both"):
+        for units in ("Millions", "Billions"):
+            basis_radio.set_value(basis)
+            units_box.set_value(units).run()
+            assert not at.exception, f"dashboard raised for basis={basis}, units={units}: {at.exception}"
+
     # Pick a couple of ratios in the multiselect (this exercises
     # compute_ratio_rows + ratio_rows_to_dataframe + the chart/table code).
-    if at.multiselect:
-        ratio_picker = at.multiselect[0]
+    ratio_picker = next((m for m in at.multiselect if m.key == "ratio_keys"), None)
+    if ratio_picker is not None:
         ratio_picker.set_value(["gross_margin", "revenue_yoy"]).run()
         assert not at.exception, f"dashboard raised after selecting ratios: {at.exception}"
 
@@ -130,9 +141,84 @@ def test_charts_tab_builds_altair_charts_from_synthetic_data():
         assert len(at.get("vega_lite_chart")) == 2
 
 
+def _synthetic_fetch_result(ticker: str, email: str, quarters: int = 8):
+    """Stand-in for pipeline.get_comparisons_for_ticker with a full set of
+    GAAP + non-GAAP fields populated, so every column in every table and
+    chart actually has numbers in it (the live fetch can't run here)."""
+    from earnings_screener.compare import build_comparisons
+    from earnings_screener.models import GaapQuarter, NonGaapQuarter, QuarterKey
+    from earnings_screener.pipeline import FetchResult
+
+    keys = [(2026, "Q1"), (2026, "Q2"), (2026, "Q3"), (2027, "Q1"), (2027, "Q2")]
+    gaap, non_gaap = [], []
+    for i, (fy, q) in enumerate(keys):
+        rev = 1_000_000_000 + i * 120_000_000
+        gaap.append(
+            GaapQuarter(
+                ticker=ticker, key=QuarterKey(fy, q), period_start="2026-01-01", period_end=f"2026-0{i + 1}-28",
+                revenue=rev, gross_profit=rev * 0.7, operating_income=-50_000_000 + i * 10_000_000,
+                net_income=-200_000_000 + i * 30_000_000, eps_diluted=-0.9 + i * 0.1, diluted_shares=340_000_000,
+                stock_based_comp=400_000_000, total_assets=9_000_000_000, total_liabilities=3_000_000_000,
+                stockholders_equity=6_000_000_000, current_assets=5_000_000_000, current_liabilities=2_000_000_000,
+                cash=1_000_000_000,
+            )
+        )
+        non_gaap.append(
+            NonGaapQuarter(
+                ticker=ticker, key=QuarterKey(fy, q), non_gaap_eps=0.3 + i * 0.08, non_gaap_operating_margin_pct=10 + i,
+                rpo=6_000_000_000 + i * 700_000_000, nrr_pct=126, product_revenue=rev * 0.95,
+            )
+        )
+    return FetchResult(ticker=ticker, comparisons=build_comparisons(gaap, non_gaap), gaap_fetch_error=None)
+
+
+def test_every_basis_and_unit_renders_with_full_synthetic_data():
+    import earnings_screener.pipeline as pipeline
+
+    original = pipeline.get_comparisons_for_ticker
+    pipeline.get_comparisons_for_ticker = _synthetic_fetch_result
+    try:
+        import streamlit as st
+
+        # st.cache_data is process-wide, so the earlier test's (failed-fetch)
+        # SNOW result would otherwise be served here instead of the synthetic
+        # data — clear it, and use a different ticker for good measure.
+        st.cache_data.clear()
+        at = _run_app()
+        at.sidebar.text_input[0].set_value("test@example.com").run()
+        at.sidebar.text_input[1].set_value("SYNTH").run()
+        assert not at.exception, f"raised on load with synthetic data: {at.exception}"
+
+        basis_radio = at.sidebar.radio[0]
+        units_box = at.sidebar.selectbox[0]
+        for basis in ("GAAP", "Non-GAAP", "Both"):
+            for units in ("Millions", "Billions"):
+                basis_radio.set_value(basis)
+                units_box.set_value(units).run()
+                assert not at.exception, f"raised for basis={basis}, units={units}: {at.exception}"
+
+        # The summary table must actually contain the scaled figure: latest
+        # quarter revenue is $1.48B -> 1480.0 in Millions, 1.48 in Billions.
+        basis_radio.set_value("GAAP")
+        units_box.set_value("Millions").run()
+        summary_df = at.dataframe[0].value
+        assert abs(summary_df.iloc[0]["Revenue"] - 1480.0) < 1e-6, summary_df.iloc[0]
+        units_box.set_value("Billions").run()
+        summary_df = at.dataframe[0].value
+        assert abs(summary_df.iloc[0]["Revenue"] - 1.48) < 1e-6, summary_df.iloc[0]
+
+        ratio_picker = next((m for m in at.multiselect if m.key == "ratio_keys"), None)
+        if ratio_picker is not None:
+            ratio_picker.set_value(["gross_margin", "roe", "pe_gaap", "pb_ratio"]).run()
+            assert not at.exception, f"raised computing ratios on synthetic data: {at.exception}"
+    finally:
+        pipeline.get_comparisons_for_ticker = original
+
+
 if __name__ == "__main__":
     test_dashboard_loads_without_exceptions()
     test_ratios_tab_renders_after_picking_a_ticker_and_ratios()
     test_charts_tab_renders_with_seeded_ticker()
     test_charts_tab_builds_altair_charts_from_synthetic_data()
+    test_every_basis_and_unit_renders_with_full_synthetic_data()
     print("Dashboard smoke tests passed.")

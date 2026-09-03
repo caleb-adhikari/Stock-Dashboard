@@ -16,6 +16,25 @@ from __future__ import annotations
 import pandas as pd
 
 from earnings_screener.models import CompanySnapshot, QuarterComparison
+from earnings_screener.units import DEFAULT_UNITS, scale_dollars
+
+
+def scale_dollar_columns(df: pd.DataFrame, columns: list[str], units: str = DEFAULT_UNITS) -> pd.DataFrame:
+    """Return a copy of `df` with the named dollar columns divided down to
+    millions/billions (see units.py). Columns that aren't present are
+    skipped, so one list of "dollar column names" can be shared across
+    tables that don't all have every column."""
+    scaled = df.copy()
+    for col in columns:
+        if col in scaled.columns:
+            scaled[col] = scaled[col].map(lambda v: scale_dollars(v, units) if pd.notna(v) else None)
+    return scaled
+
+
+def summary_rows_to_dataframe(rows: list[dict]) -> pd.DataFrame:
+    """`summary.build_summary_rows()` output -> DataFrame, order preserved
+    (newest-first, as compare.py returns comparisons)."""
+    return pd.DataFrame(rows)
 
 
 def comparisons_to_dataframe(comparisons: list[QuarterComparison], ascending: bool = True) -> pd.DataFrame:
@@ -34,6 +53,8 @@ def comparisons_to_dataframe(comparisons: list[QuarterComparison], ascending: bo
                 "Revenue": gaap.revenue if gaap else None,
                 "Revenue QoQ %": comp.revenue_qoq_pct,
                 "Revenue YoY %": comp.revenue_yoy_pct,
+                "Gross Profit": gaap.gross_profit if gaap else None,
+                "Operating Income": gaap.operating_income if gaap else None,
                 "Net Income (GAAP)": gaap.net_income if gaap else None,
                 "GAAP EPS (diluted)": gaap.eps_diluted if gaap else None,
                 "Non-GAAP EPS": non_gaap.non_gaap_eps if non_gaap else None,

@@ -58,7 +58,13 @@ from earnings_screener.charting import (
 )
 from earnings_screener.compare import find_divergences
 from earnings_screener.cross_company import build_snapshot_table
-from earnings_screener.dataframes import comparisons_to_dataframe, ratio_rows_to_dataframe, snapshots_to_dataframe
+from earnings_screener.dataframes import (
+    comparisons_to_dataframe,
+    ratio_rows_to_dataframe,
+    scale_dollar_columns,
+    snapshots_to_dataframe,
+    summary_rows_to_dataframe,
+)
 from earnings_screener.pipeline import FetchResult, get_comparisons_for_ticker
 from earnings_screener.ratios import RATIO_BY_KEY, RATIO_CATALOG, compute_ratio_rows
 from earnings_screener.sources.stock_prices import (
@@ -67,6 +73,8 @@ from earnings_screener.sources.stock_prices import (
     fetch_price_history,
     normalize_to_pct_change,
 )
+from earnings_screener.summary import BASES, DEFAULT_BASIS, SummaryColumn, build_summary_rows, summary_columns
+from earnings_screener.units import DEFAULT_UNITS, DOLLAR_UNITS, unit_suffix
 from earnings_screener.watchlist import load_watchlist, save_watchlist
 
 EMAIL_ENV_VAR = "EARNINGS_SCREENER_EMAIL"
@@ -115,7 +123,7 @@ def cached_latest_price(ticker: str):
 # ---------------------------------------------------------------------------
 
 
-def render_charts_tab(ticker: str, comparisons) -> None:
+def render_charts_tab(ticker: str, comparisons, units: str | None = None) -> None:
     """
     Pick any of the quarterly metrics in charting.CHART_METRIC_CATALOG
     (revenue, the expense lines, net income, RPO, ...) and see them plotted
@@ -167,7 +175,11 @@ def render_charts_tab(ticker: str, comparisons) -> None:
     metric_order = [CHART_METRIC_BY_KEY[k].label for k in selected_keys]
 
     # -- Dollar values ---------------------------------------------------------
-    divisor, unit_label = pick_dollar_unit(df["Value"].tolist())
+    if units:
+        # Sidebar's Millions/Billions choice, so charts and tables agree.
+        divisor, unit_label = DOLLAR_UNITS[units][0], f"$ {units.lower()}"
+    else:
+        divisor, unit_label = pick_dollar_unit(df["Value"].tolist())
     values_df = df.dropna(subset=["Value"]).copy()
     values_df["Scaled"] = values_df["Value"] / divisor
 
@@ -263,7 +275,7 @@ def render_charts_tab(ticker: str, comparisons) -> None:
     with st.expander("Show data table"):
         table = (
             df.pivot(index="Quarter", columns="Metric", values=["Value", "QoQ %", "YoY %"])
-            .reindex(quarter_order[::-1])  # newest first, like the Quarterly Detail table
+            .reindex(quarter_order[::-1])  # newest first, like the Summary table
         )
         # Flatten the (measure, metric) column pairs to "Revenue", "Revenue QoQ %", ...
         table.columns = [
@@ -292,6 +304,27 @@ def render_charts_tab(ticker: str, comparisons) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _dollar_format(units: str) -> str:
+    """printf-style format for a Streamlit NumberColumn holding a dollar
+    figure already scaled to `units` — '$%.1fM' or '$%.2fB'."""
+    decimals = 1 if units == "Millions" else 2
+    return f"$%.{decimals}f{unit_suffix(units)}"
+
+
+def _column_config_for(columns: list[SummaryColumn], units: str) -> dict:
+    """Streamlit column formatting driven by summary.py's column kinds, so
+    the dashboard never has to hard-code which columns are dollars/EPS/%."""
+    config = {}
+    for col in columns:
+        if col.kind == "dollars":
+            config[col.label] = st.column_config.NumberColumn(col.label, format=_dollar_format(units))
+        elif col.kind == "eps":
+            config[col.label] = st.column_config.NumberColumn(col.label, format="$%.2f")
+        elif col.kind == "pct":
+            config[col.label] = st.column_config.NumberColumn(col.label, format="%.1f%%")
+    return config
+
+
 def render_earnings_screener_tab(email: str) -> None:
     st.sidebar.header("Earnings Screener settings")
     primary_ticker = st.sidebar.text_input("Primary ticker", value="SNOW").strip().upper()
@@ -302,6 +335,20 @@ def render_earnings_screener_tab(email: str) -> None:
     )
     compare_tickers = [t.strip().upper() for t in compare_input.split(",") if t.strip()]
     quarters = st.sidebar.slider("Quarters of GAAP history", min_value=4, max_value=12, value=8)
+
+    # Which set of numbers to show. GAAP is the default because that's what
+    # you want the vast majority of the time; "Both" is the original
+    # GAAP-vs-non-GAAP comparison this project started as.
+    basis = st.sidebar.radio(
+        "Numbers to show",
+        BASES,
+        index=BASES.index(DEFAULT_BASIS),
+        horizontal=True,
+        help="GAAP = official SEC-filed figures. Non-GAAP = the company's own adjusted figures "
+        "(only for tickers with data in data/non_gaap/). Both = side by side, with the gap.",
+    )
+    units = st.sidebar.selectbox("Dollar figures in", list(DOLLAR_UNITS), index=list(DOLLAR_UNITS).index(DEFAULT_UNITS))
+
     price_period = st.sidebar.selectbox("Price chart range", ["6mo", "1y", "2y", "5y"], index=1)
     show_earnings_markers = st.sidebar.checkbox("Mark earnings dates on price chart", value=True)
 
@@ -327,77 +374,82 @@ def render_earnings_screener_tab(email: str) -> None:
         st.error(f"No data found at all for {primary_ticker}.")
         return
 
-    df_asc = comparisons_to_dataframe(result.comparisons, ascending=True)  # chronological, for charts
-    df_table = df_asc.iloc[::-1]  # most-recent-first, for the table
+    has_non_gaap = any(c.non_gaap is not None for c in result.comparisons)
+    if basis != "GAAP" and not has_non_gaap:
+        st.info(
+            f"No non-GAAP data has been entered for {primary_ticker} yet (data/non_gaap/{primary_ticker}.json), "
+            "so non-GAAP columns will be blank. GAAP figures still work for any ticker."
+        )
 
-    tab_detail, tab_charts, tab_growth, tab_price, tab_compare, tab_ratios = st.tabs(
-        ["Quarterly Detail", "Charts", "QoQ vs YoY", "Stock Price", "Compare Companies", "Ratios"]
+    # Chronological DataFrame with every column — the charts pick from it.
+    # Dollar columns are scaled once here so every chart uses the same units.
+    dollar_columns = ["Revenue", "Gross Profit", "Operating Income", "Net Income (GAAP)", "RPO"]
+    df_asc = scale_dollar_columns(comparisons_to_dataframe(result.comparisons, ascending=True), dollar_columns, units)
+    by_quarter = df_asc.set_index("Quarter")
+    suffix = unit_suffix(units)
+
+    tab_summary, tab_charts, tab_price, tab_compare, tab_ratios = st.tabs(
+        ["Summary", "Charts", "Stock Price", "Compare Companies", "Ratios"]
     )
 
-    # -- Quarterly Detail --------------------------------------------------
-    with tab_detail:
-        st.subheader(f"{primary_ticker} — GAAP vs non-GAAP by quarter")
-
-        dollar_cols = ["Revenue", "Net Income (GAAP)", "RPO"]
-        pct_cols = [
-            "Revenue QoQ %",
-            "Revenue YoY %",
-            "Gap % of Revenue",
-            "SBC % of Revenue",
-            "Non-GAAP Op Margin %",
-            "RPO QoQ %",
-            "RPO YoY %",
-            "NRR %",
-        ]
-        eps_cols = ["GAAP EPS (diluted)", "Non-GAAP EPS", "EPS Gap"]
-
-        column_config = {}
-        for col in dollar_cols:
-            column_config[col] = st.column_config.NumberColumn(col, format="$%.0f")
-        for col in pct_cols:
-            column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
-        for col in eps_cols:
-            column_config[col] = st.column_config.NumberColumn(col, format="$%.2f")
-
+    # -- Summary ------------------------------------------------------------
+    with tab_summary:
+        st.subheader(f"{primary_ticker} — {basis} figures by quarter, with year-over-year change")
+        st.caption(
+            f"Dollar figures in {units.lower()}. Each “YoY %” column compares that quarter to the same "
+            "fiscal quarter one year earlier. Charts are on the next tab."
+        )
+        columns = summary_columns(basis)
+        rows = build_summary_rows(result.comparisons, basis)  # newest-first
+        summary_df = scale_dollar_columns(
+            summary_rows_to_dataframe(rows), [c.label for c in columns if c.kind == "dollars"], units
+        )
         st.dataframe(
-            df_table.drop(columns=["Fiscal Year", "Fiscal Period"]),
+            summary_df,
             width="stretch",
-            column_config=column_config,
+            column_config=_column_config_for(columns, units),
             hide_index=True,
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption("GAAP vs non-GAAP EPS")
-            st.line_chart(df_asc.set_index("Quarter")[["GAAP EPS (diluted)", "Non-GAAP EPS"]])
-        with col2:
-            st.caption("Gap as % of revenue")
-            st.bar_chart(df_asc.set_index("Quarter")[["Gap % of Revenue"]])
-
-    # -- Charts ---------------------------------------------------------------
+    # -- Charts -------------------------------------------------------------
     with tab_charts:
-        render_charts_tab(primary_ticker, result.comparisons)
+        # The metric picker / bar-vs-line / growth charts live in
+        # render_charts_tab (above); the sidebar's dollar units are passed
+        # through so the axis matches the Summary table.
+        render_charts_tab(primary_ticker, result.comparisons, units)
 
-    # -- QoQ vs YoY ----------------------------------------------------------
-    with tab_growth:
-        st.subheader(f"{primary_ticker} — sequential vs. year-over-year growth")
-        st.caption(
-            "The point of showing both: a metric can be growing YoY while shrinking QoQ "
-            "(deceleration or seasonality) — that pattern is easy to miss looking at either number alone."
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption("Revenue growth")
-            st.line_chart(df_asc.set_index("Quarter")[["Revenue QoQ %", "Revenue YoY %"]])
-        with col2:
-            rpo_growth = df_asc.set_index("Quarter")[["RPO QoQ %", "RPO YoY %"]].dropna(how="all")
-            if not rpo_growth.empty:
-                st.caption("RPO growth")
-                st.line_chart(rpo_growth)
+        st.divider()
+        col_eps, col_growth = st.columns(2)
+        with col_eps:
+            if basis == "GAAP":
+                st.caption("Diluted EPS (GAAP)")
+                st.line_chart(by_quarter[["GAAP EPS (diluted)"]])
+            elif basis == "Non-GAAP":
+                eps = by_quarter[["Non-GAAP EPS"]].dropna()
+                st.caption("Non-GAAP EPS")
+                if eps.empty:
+                    st.caption("(no non-GAAP EPS entered yet)")
+                else:
+                    st.line_chart(eps)
+            else:  # Both
+                st.caption("GAAP vs non-GAAP EPS")
+                st.line_chart(by_quarter[["GAAP EPS (diluted)", "Non-GAAP EPS"]])
+        with col_growth:
+            if basis == "Both":
+                st.caption("GAAP/non-GAAP gap as % of revenue")
+                st.bar_chart(by_quarter[["Gap % of Revenue"]])
             else:
-                st.caption("RPO growth (no RPO data entered for enough consecutive quarters yet)")
+                rpo_growth = by_quarter[["RPO QoQ %", "RPO YoY %"]].dropna(how="all")
+                st.caption("RPO growth — QoQ vs YoY %")
+                if rpo_growth.empty:
+                    st.caption("(needs RPO entered for enough consecutive quarters)")
+                else:
+                    st.line_chart(rpo_growth)
 
+        st.caption(
+            "Why QoQ and YoY are shown together: a metric can still be growing year-over-year while "
+            "shrinking sequentially (deceleration or seasonality) — easy to miss looking at either alone."
+        )
         divergences = find_divergences(result.comparisons)
         if divergences:
             for message in divergences:
@@ -461,16 +513,25 @@ def render_earnings_screener_tab(email: str) -> None:
         else:
             st.subheader("Latest reported quarter, side by side")
             st.caption(
-                "Companies are lined up by each one's own most recent quarter, not matching fiscal quarter "
-                "numbers — see cross_company.py for why that's the right comparison across different fiscal calendars."
+                f"Dollar figures in {units.lower()}. Companies are lined up by each one's own most recent quarter, "
+                "not matching fiscal quarter numbers — see cross_company.py for why that's the right comparison "
+                "across different fiscal calendars."
             )
 
             snapshots, _fetch_results = cached_snapshot_table(tuple(all_tickers), email, quarters)
-            snap_df = snapshots_to_dataframe(snapshots)
+            snap_df = scale_dollar_columns(snapshots_to_dataframe(snapshots), ["Revenue", "RPO"], units)
+
+            # Trim the side-by-side table to the chosen basis too.
+            gaap_only_cols = ["Non-GAAP EPS", "EPS Gap", "Gap % of Revenue", "Non-GAAP Op Margin %", "RPO", "RPO YoY %", "NRR %"]
+            non_gaap_only_cols = ["GAAP EPS", "EPS Gap", "Gap % of Revenue"]
+            if basis == "GAAP":
+                snap_df = snap_df.drop(columns=[c for c in gaap_only_cols if c in snap_df.columns])
+            elif basis == "Non-GAAP":
+                snap_df = snap_df.drop(columns=[c for c in non_gaap_only_cols if c in snap_df.columns])
 
             snap_column_config = {
-                "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
-                "RPO": st.column_config.NumberColumn("RPO", format="$%.0f"),
+                "Revenue": st.column_config.NumberColumn("Revenue", format=_dollar_format(units)),
+                "RPO": st.column_config.NumberColumn("RPO", format=_dollar_format(units)),
                 "GAAP EPS": st.column_config.NumberColumn("GAAP EPS", format="$%.2f"),
                 "Non-GAAP EPS": st.column_config.NumberColumn("Non-GAAP EPS", format="$%.2f"),
                 "EPS Gap": st.column_config.NumberColumn("EPS Gap", format="$%.2f"),
@@ -490,9 +551,10 @@ def render_earnings_screener_tab(email: str) -> None:
                     st.caption("Revenue YoY growth, latest quarter")
                     st.bar_chart(growth_df)
             with col2:
-                eps_df = snap_df.set_index("Ticker")[["GAAP EPS", "Non-GAAP EPS"]].dropna(how="all")
+                eps_cols = [c for c in ["GAAP EPS", "Non-GAAP EPS"] if c in snap_df.columns]
+                eps_df = snap_df.set_index("Ticker")[eps_cols].dropna(how="all")
                 if not eps_df.empty:
-                    st.caption("GAAP vs non-GAAP EPS, latest quarter")
+                    st.caption("EPS, latest quarter")
                     st.bar_chart(eps_df)
 
             note_rows = snap_df[snap_df["Note"] != ""]
@@ -516,6 +578,7 @@ def render_earnings_screener_tab(email: str) -> None:
             default=[k for k in default_keys if k in options],
             format_func=lambda key: f"{RATIO_BY_KEY[key].category} — {RATIO_BY_KEY[key].label}",
             help="Grouped by category in the label (Profitability, Returns, Liquidity, Valuation, Growth).",
+            key="ratio_keys",
         )
 
         if not selected_keys:

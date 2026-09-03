@@ -62,6 +62,8 @@ earnings_screener/
     pipeline.py             # "given a ticker, fetch+merge its data" — shared by cli.py and dashboard.py
     ratios.py                # the financial ratio catalog + TTM math for the dashboard's Ratios dropdown
     charting.py              # the chartable-metric catalog (revenue, expense lines, ...) + per-metric QoQ/YoY, for the Charts tab
+    summary.py               # the trimmed YoY summary table; GAAP / Non-GAAP / Both column sets
+    units.py                 # Millions/Billions display scaling for dollar figures
     dataframes.py            # converts the typed objects above into pandas DataFrames (dashboard only)
     watchlist.py             # load/save a persisted list of tickers (JSON file), used by the Watchlist tab
     cli.py                  # `python -m earnings_screener TICKER`
@@ -74,6 +76,7 @@ tests/
     test_cross_company.py        # snapshot-building + DataFrame conversion
     test_ratios.py                # TTM math + individual ratio formulas (see "How the ratio dropdown works")
     test_charting.py              # derived expense lines + per-metric growth math (see "How the Charts tab works")
+    test_summary.py               # YoY summary rows per basis + Millions/Billions scaling
     test_stock_prices.py         # price-history combine/normalize helpers
     test_watchlist.py            # watchlist load/save round-trip
     test_dashboard_smoke.py      # headless Streamlit AppTest — dashboard.py runs without crashing
@@ -81,8 +84,8 @@ tests/
 
 **Why it's split up this way — the dependency direction matters:**
 `models.py`, `sources/sec_edgar.py`, `sources/manual_nongaap.py`,
-`compare.py`, `cross_company.py`, `pipeline.py`, `ratios.py`, and
-`charting.py` use nothing but the standard library. `dataframes.py`, `sources/stock_prices.py`,
+`compare.py`, `cross_company.py`, `pipeline.py`, `ratios.py`, `charting.py`,
+`summary.py`, and `units.py` use nothing but the standard library. `dataframes.py`, `sources/stock_prices.py`,
 and `dashboard.py` are the only files that know about `pandas`/`yfinance`/
 `streamlit`. That means the core pipeline stays usable from a bare Python
 install (a script, a notebook, a cron job, a different UI entirely) even
@@ -165,26 +168,45 @@ reasoning.
 
 `streamlit run dashboard.py` opens a browser tab with two top-level tabs:
 
-**Earnings Screener** — everything from before, now nested under one tab,
-with six sections inside it:
+**Earnings Screener** — look up one ticker. Two sidebar controls apply to
+everything in this tab:
 
-- **Quarterly Detail** — the GAAP vs. non-GAAP table and charts for one
-  ticker (same data as the CLI, browsable/sortable instead of printed).
+- **Numbers to show: GAAP / Non-GAAP / Both.** Defaults to GAAP (the
+  official SEC-filed figures), which is what you want most of the time.
+  Non-GAAP shows the company's own adjusted figures from its press
+  release (only for tickers with a `data/non_gaap/<TICKER>.json`);
+  Both puts GAAP and non-GAAP EPS side by side with the gap metrics —
+  the comparison this project originally started as. The column sets
+  for each are defined in `earnings_screener/summary.py`, so adding a
+  column is one line there.
+- **Dollar figures in: Millions / Billions.** Display-only scaling
+  (`earnings_screener/units.py`) applied to every dollar column in the
+  tables and to the chart axes — the underlying data always stays in
+  full dollars, so ratio math can't be thrown off by it.
+
+Then five sections:
+
+- **Summary** — the deliberately trimmed table: one row per quarter with
+  the headline figures for the chosen basis (revenue, gross profit,
+  operating income, net income, EPS for GAAP) and a **YoY %** column
+  next to each, comparing against the same fiscal quarter one year
+  earlier. No charts here on purpose — they're on the next tab.
 - **Charts** — pick any combination of quarterly metrics (revenue, gross
   profit, cost of revenue, operating expenses, total costs, operating
   income, net income, stock-based comp, RPO, product revenue) and see them
   plotted quarter by quarter as grouped bars or lines, with a second chart
   of each one's QoQ and/or YoY growth %, and an expandable table of the
-  numbers behind both. See "How the Charts tab works" below.
-- **QoQ vs YoY** — growth-rate charts plus the same divergence flags the
-  CLI prints (e.g. "RPO fell X% QoQ while still up Y% YoY").
+  numbers behind both (see "How the Charts tab works" below). Below that,
+  an EPS chart for the chosen basis (GAAP, non-GAAP, or both overlaid
+  with the gap-as-%-of-revenue), and the same divergence flags the CLI
+  prints (e.g. "RPO fell X% QoQ while still up Y% YoY").
 - **Stock Price** — a price chart for the primary ticker (and any
   comparison tickers, normalized to % change so different share prices
   are comparable), optionally with the reported quarter-end dates marked
   so you can eyeball how price moved around earnings.
 - **Compare Companies** — add tickers in the sidebar to see their latest
-  quarters side by side, plus bar charts of revenue YoY growth and
-  GAAP-vs-non-GAAP EPS across companies.
+  quarters side by side (trimmed to the chosen basis, in the chosen
+  units), plus bar charts of revenue YoY growth and EPS across companies.
 - **Ratios** — a dropdown ("multiselect") of standard financial ratios,
   grouped by category (Profitability, Returns, Liquidity, Valuation,
   Growth). Pick whichever ones you want and it computes them for every
