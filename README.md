@@ -10,19 +10,12 @@
 > professional developer. Treat it as a personal tool and a learning
 > project, not production or investment-grade software.
 
-Pulls a company's official GAAP figures from SEC EDGAR, lines them up next
-to its non-GAAP ("adjusted") figures, and shows a quarter-by-quarter
-comparison — the GAAP/non-GAAP gap, QoQ vs. YoY divergence checks (e.g. RPO
-growing YoY but shrinking sequentially), a stock price chart, and
-side-by-side comparison across multiple companies. Also includes a
+Pulls a company's official GAAP figures from SEC EDGAR, and helps one analyze the numbers and compare.
+Also includes a
 watchlist for tracking a personal list of tickers' price charts. Available
 both as a CLI (`python3 -m earnings_screener TICKER`) and as an
 interactive Streamlit dashboard (`streamlit run dashboard.py`).
 
-The "flag it as abnormal" threshold logic is still intentionally not
-built — see "Next steps" below. The point so far has been to get real
-numbers in front of you to build intuition for what "normal" looks like
-before deciding on a rule.
 
 ## Requirements
 
