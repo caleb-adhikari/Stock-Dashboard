@@ -1,0 +1,35 @@
+[
+  {
+    "fiscal_year": 2027,
+    "fiscal_period": "Q2",
+    "non_gaap_eps": 0.62,
+    "non_gaap_operating_margin_pct": 15.3,
+    "rpo": 9000000000,
+    "nrr_pct": 126,
+    "product_revenue": null,
+    "notes": "Reported 2026-09-02, quarter ended 2026-07-31. Total revenue $1.55B (GAAP, from SEC filing once available). Guidance going in was product revenue $1.415-1.42B; new FY2027 product revenue guidance raised to $6.07B (from prior $5.84B). RPO +30% YoY.",
+    "source": "SNOW Q2 FY2027 earnings press release, 2026-09-02"
+  },
+  {
+    "fiscal_year": 2027,
+    "fiscal_period": "Q1",
+    "non_gaap_eps": null,
+    "non_gaap_operating_margin_pct": null,
+    "rpo": 9210000000,
+    "nrr_pct": null,
+    "product_revenue": null,
+    "notes": "Reported 2026-05-27, quarter ended 2026-04-30. RPO +38% YoY. Non-GAAP EPS/margin/NRR not yet entered for this quarter.",
+    "source": "SNOW Q1 FY2027 earnings press release, 2026-05-27"
+  },
+  {
+    "fiscal_year": 2026,
+    "fiscal_period": "Q2",
+    "non_gaap_eps": null,
+    "non_gaap_operating_margin_pct": null,
+    "rpo": 6900000000,
+    "nrr_pct": null,
+    "product_revenue": 1090000000,
+    "notes": "Reported ~2025-08-27, quarter ended 2025-07-31. Product revenue $1.09B (+32% YoY), total revenue $1.145B (+32% YoY), RPO +33% YoY. Non-GAAP EPS/margin/NRR not yet entered for this quarter.",
+    "source": "SNOW Q2 FY2026 earnings press release, 2025-08-27"
+  }
+]

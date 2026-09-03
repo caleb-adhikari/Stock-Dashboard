@@ -1,0 +1,12 @@
+# Core data pipeline (models.py, compare.py, cross_company.py, pipeline.py,
+# sources/sec_edgar.py, sources/manual_nongaap.py, cli.py) uses only the
+# Python standard library on purpose — no install needed to use those on
+# their own (e.g. from a plain script or notebook).
+#
+# The dashboard adds three dependencies:
+streamlit>=1.60          # turns dashboard.py into a browser-based app
+yfinance>=1.7             # stock price history for the price chart
+pandas>=2.2               # DataFrames used by dashboard.py and dataframes.py
+
+# Install everything with:
+#   pip3 install -r requirements.txt

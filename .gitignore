@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Anything that might hold a personal contact email or future secrets —
+# this project reads the SEC EDGAR contact email from an environment
+# variable or a CLI flag on purpose (never hardcoded), but if you ever
+# save it to a local file for convenience, keep it out of git.
+.env
+*.local.json
+
+# OS cruft
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
