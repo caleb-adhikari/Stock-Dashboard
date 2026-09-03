@@ -51,10 +51,12 @@ import streamlit as st
 
 from earnings_screener.compare import find_divergences
 from earnings_screener.cross_company import build_snapshot_table
-from earnings_screener.dataframes import comparisons_to_dataframe, snapshots_to_dataframe
+from earnings_screener.dataframes import comparisons_to_dataframe, ratio_rows_to_dataframe, snapshots_to_dataframe
 from earnings_screener.pipeline import FetchResult, get_comparisons_for_ticker
+from earnings_screener.ratios import RATIO_BY_KEY, RATIO_CATALOG, compute_ratio_rows
 from earnings_screener.sources.stock_prices import (
     combine_price_histories,
+    fetch_latest_price,
     fetch_price_history,
     normalize_to_pct_change,
 )
@@ -91,6 +93,14 @@ def cached_snapshot_table(tickers: tuple[str, ...], email: str, quarters: int):
 @st.cache_data(ttl=3600, show_spinner="Fetching price history...")
 def cached_price_history(ticker: str, period: str):
     return fetch_price_history(ticker, period=period)
+
+
+@st.cache_data(ttl=900, show_spinner="Fetching latest price...")
+def cached_latest_price(ticker: str):
+    # Shorter TTL than the other caches (15 min, not 1 hr) since this feeds
+    # valuation ratios (P/E, P/S, P/B) where "latest price" is the whole
+    # point — no reason to hold a stale price longer than necessary.
+    return fetch_latest_price(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +146,8 @@ def render_earnings_screener_tab(email: str) -> None:
     df_asc = comparisons_to_dataframe(result.comparisons, ascending=True)  # chronological, for charts
     df_table = df_asc.iloc[::-1]  # most-recent-first, for the table
 
-    tab_detail, tab_growth, tab_price, tab_compare = st.tabs(
-        ["Quarterly Detail", "QoQ vs YoY", "Stock Price", "Compare Companies"]
+    tab_detail, tab_growth, tab_price, tab_compare, tab_ratios = st.tabs(
+        ["Quarterly Detail", "QoQ vs YoY", "Stock Price", "Compare Companies", "Ratios"]
     )
 
     # -- Quarterly Detail --------------------------------------------------
@@ -300,6 +310,70 @@ def render_earnings_screener_tab(email: str) -> None:
             note_rows = snap_df[snap_df["Note"] != ""]
             for _, row in note_rows.iterrows():
                 st.caption(f"{row['Ticker']}: {row['Note']}")
+
+    # -- Ratios --------------------------------------------------------------
+    with tab_ratios:
+        st.subheader(f"{primary_ticker} — financial ratios")
+        st.caption(
+            "Pick the ratios you want and this computes the math from the GAAP/non-GAAP data above — "
+            "no separate lookup needed."
+        )
+
+        options = [r.key for r in RATIO_CATALOG]
+        default_keys = ["gross_margin", "net_margin", "revenue_yoy"]
+
+        selected_keys = st.multiselect(
+            "Ratios to compute",
+            options=options,
+            default=[k for k in default_keys if k in options],
+            format_func=lambda key: f"{RATIO_BY_KEY[key].category} — {RATIO_BY_KEY[key].label}",
+            help="Grouped by category in the label (Profitability, Returns, Liquidity, Valuation, Growth).",
+        )
+
+        if not selected_keys:
+            st.info("Pick one or more ratios above to see them computed for every quarter shown.")
+        else:
+            selected_ratios = [RATIO_BY_KEY[k] for k in selected_keys]
+            needs_price = any(r.needs_price for r in selected_ratios)
+
+            latest_price = None
+            if needs_price:
+                latest_price = cached_latest_price(primary_ticker)
+                if latest_price is None:
+                    st.caption(
+                        f"Couldn't fetch a current price for {primary_ticker} — valuation ratios "
+                        "(P/E, P/S, P/B) will show as blank."
+                    )
+
+            # result.comparisons is already newest-first (see compare.py), which
+            # is exactly the order the TTM-based ratios (ROE, ROA, P/E, P/S)
+            # need — each one sums the 4 quarters starting at its own index.
+            rows = compute_ratio_rows(result.comparisons, selected_keys, latest_price=latest_price)
+            ratio_df_newest_first = ratio_rows_to_dataframe(rows)
+
+            format_by_key = {"pct": "%.1f%%", "multiple": "%.1fx", "ratio": "%.2f"}
+            ratio_column_config = {
+                r.label: st.column_config.NumberColumn(r.label, format=format_by_key[r.format], help=r.description)
+                for r in selected_ratios
+            }
+            st.dataframe(
+                ratio_df_newest_first,
+                width="stretch",
+                column_config=ratio_column_config,
+                hide_index=True,
+            )
+
+            pct_or_ratio_ratios = [r for r in selected_ratios if r.format in ("pct", "ratio")]
+            multiple_ratios = [r for r in selected_ratios if r.format == "multiple"]
+            ratio_df_chart = ratio_df_newest_first.iloc[::-1].set_index("Quarter")  # chronological, for charts
+
+            if pct_or_ratio_ratios:
+                st.caption("Percentages and ratios")
+                st.line_chart(ratio_df_chart[[r.label for r in pct_or_ratio_ratios]])
+            if multiple_ratios:
+                st.caption("Valuation multiples (uses today's price against each historical quarter's TTM figures — "
+                            "see README for why that's a simplification)")
+                st.line_chart(ratio_df_chart[[r.label for r in multiple_ratios]])
 
 
 # ---------------------------------------------------------------------------

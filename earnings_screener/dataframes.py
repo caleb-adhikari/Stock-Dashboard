@@ -58,6 +58,20 @@ def comparisons_to_dataframe(comparisons: list[QuarterComparison], ascending: bo
     return df
 
 
+def ratio_rows_to_dataframe(rows: list[dict]) -> pd.DataFrame:
+    """
+    Convert `ratios.compute_ratio_rows()`'s plain-dict output into a
+    DataFrame. No re-sorting happens here — `compute_ratio_rows` returns
+    one row per input `QuarterComparison` in the exact order it was given
+    (see its docstring), so the caller controls chronological-vs-newest-
+    first ordering the same way it already does for
+    `comparisons_to_dataframe` (by choosing which order to pass
+    `comparisons` in), rather than this function re-deriving a sort key
+    from the "Quarter" label string.
+    """
+    return pd.DataFrame(rows)
+
+
 def snapshots_to_dataframe(snapshots: list[CompanySnapshot]) -> pd.DataFrame:
     """One row per company — the shape used for the cross-company
     comparison table and bar chart."""

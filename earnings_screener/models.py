@@ -54,10 +54,26 @@ class GaapQuarter:
     period_start: str  # ISO date string, e.g. "2026-05-01"
     period_end: str  # ISO date string, e.g. "2026-07-31"
     revenue: Optional[float] = None
+    gross_profit: Optional[float] = None
+    operating_income: Optional[float] = None
     net_income: Optional[float] = None  # negative = net loss
     eps_diluted: Optional[float] = None
     diluted_shares: Optional[float] = None
     stock_based_comp: Optional[float] = None
+
+    # Balance sheet figures below are "instant" facts — a snapshot AS OF
+    # period_end, not a total accumulated DURING the quarter the way
+    # revenue/net_income are. We attach them to the quarter they line up
+    # with so ratio math (ROE, current ratio, P/B, ...) has everything it
+    # needs on one object. See sec_edgar.py's docstring for why instant
+    # facts need different parsing than duration facts.
+    total_assets: Optional[float] = None
+    total_liabilities: Optional[float] = None
+    stockholders_equity: Optional[float] = None
+    current_assets: Optional[float] = None
+    current_liabilities: Optional[float] = None
+    cash: Optional[float] = None
+
     source_accession: Optional[str] = None  # SEC accession number, for traceability
     filed_date: Optional[str] = None
 

@@ -91,6 +91,29 @@ def test_tag_fallback_skips_tags_with_no_data():
     assert len(values) > 0
 
 
+def test_best_instant_values_ignores_duration_takes_latest_filed():
+    """Balance sheet figures (assets, equity, cash) are 'instant' facts — a
+    snapshot as of one date, not a total accumulated over a quarter — so
+    unlike _best_quarterly_values there's no duration to filter on. This
+    checks the restatement handling (latest `filed` wins) still applies,
+    and that a 10-K entry (annual filing) is excluded the same way it is
+    for duration facts, so balance sheet snapshots line up with the same
+    quarter-end dates as revenue/EPS."""
+    client = SecEdgarClient(contact_email="test@example.com")
+    concept = {
+        "units": {
+            "USD": [
+                {"end": "2026-04-30", "val": 1_000_000_000, "form": "10-Q", "filed": "2026-05-27"},
+                {"end": "2026-04-30", "val": 999_000_000, "form": "10-Q", "filed": "2026-05-20"},  # earlier filing, same date
+                {"end": "2026-01-31", "val": 900_000_000, "form": "10-K", "filed": "2026-03-15"},  # annual, should be skipped
+            ]
+        }
+    }
+    best = client._best_instant_values(concept)
+    assert set(best.keys()) == {"2026-04-30"}
+    assert best["2026-04-30"]["val"] == 1_000_000_000, "should keep the later-filed value"
+
+
 def test_fetch_quarterly_gaap_raises_clear_error_when_no_revenue_tag_matches():
     """If a ticker's financials don't use ANY of our known revenue tags
     (e.g. a bank), this should fail loudly and specifically — not silently
@@ -114,5 +137,6 @@ if __name__ == "__main__":
     test_prefers_most_recently_filed_value_on_restatement()
     test_single_quarter_duration_check()
     test_tag_fallback_skips_tags_with_no_data()
+    test_best_instant_values_ignores_duration_takes_latest_filed()
     test_fetch_quarterly_gaap_raises_clear_error_when_no_revenue_tag_matches()
     print("All offline parsing tests passed.")

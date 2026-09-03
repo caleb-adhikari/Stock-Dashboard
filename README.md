@@ -60,6 +60,7 @@ earnings_screener/
     compare.py              # merges GAAP+non-GAAP for ONE company, computes gap/QoQ/YoY metrics
     cross_company.py        # lines up several companies' latest quarters side by side
     pipeline.py             # "given a ticker, fetch+merge its data" — shared by cli.py and dashboard.py
+    ratios.py                # the financial ratio catalog + TTM math for the dashboard's Ratios dropdown
     dataframes.py            # converts the typed objects above into pandas DataFrames (dashboard only)
     watchlist.py             # load/save a persisted list of tickers (JSON file), used by the Watchlist tab
     cli.py                  # `python -m earnings_screener TICKER`
@@ -70,15 +71,17 @@ data/
 tests/
     test_sec_edgar_parsing.py   # EDGAR quarter-filtering/dedup logic (see below)
     test_cross_company.py        # snapshot-building + DataFrame conversion
+    test_ratios.py                # TTM math + individual ratio formulas (see "How the ratio dropdown works")
     test_stock_prices.py         # price-history combine/normalize helpers
     test_watchlist.py            # watchlist load/save round-trip
+    test_dashboard_smoke.py      # headless Streamlit AppTest — dashboard.py runs without crashing
 ```
 
 **Why it's split up this way — the dependency direction matters:**
 `models.py`, `sources/sec_edgar.py`, `sources/manual_nongaap.py`,
-`compare.py`, `cross_company.py`, and `pipeline.py` use nothing but the
-standard library. `dataframes.py`, `sources/stock_prices.py`, and
-`dashboard.py` are the only files that know about `pandas`/`yfinance`/
+`compare.py`, `cross_company.py`, `pipeline.py`, and `ratios.py` use
+nothing but the standard library. `dataframes.py`, `sources/stock_prices.py`,
+and `dashboard.py` are the only files that know about `pandas`/`yfinance`/
 `streamlit`. That means the core pipeline stays usable from a bare Python
 install (a script, a notebook, a cron job, a different UI entirely) even
 if you never touch the dashboard — the dashboard is a consumer of the
@@ -174,6 +177,12 @@ with four sections inside it:
 - **Compare Companies** — add tickers in the sidebar to see their latest
   quarters side by side, plus bar charts of revenue YoY growth and
   GAAP-vs-non-GAAP EPS across companies.
+- **Ratios** — a dropdown ("multiselect") of standard financial ratios,
+  grouped by category (Profitability, Returns, Liquidity, Valuation,
+  Growth). Pick whichever ones you want and it computes them for every
+  quarter shown — a table plus a line chart. See `earnings_screener/ratios.py`
+  for the full catalog and formulas (each one has a `description` field
+  shown as a tooltip on its column header in the table).
 
 **Watchlist** — a separate, simpler feature: add tickers to a personal
 list (persisted to `data/watchlist.json`, so it survives closing and
@@ -195,6 +204,54 @@ lives in its own function (`render_earnings_screener_tab` /
 one tab bail out early (no email entered yet, no watchlist tickers yet)
 via a normal `return` without blanking out the *other* tab too, which is
 what would happen with Streamlit's `st.stop()`.
+
+## How the ratio dropdown works
+
+`earnings_screener/ratios.py` holds the catalog: each ratio is a small,
+self-contained definition (label, category, format, and a `compute`
+function) in a list (`RATIO_CATALOG`), so the dashboard's multiselect is
+just "show me the catalog's labels" and computing the selected ones is
+just "call each one's `compute` function." It's stdlib-only, like
+`compare.py`/`cross_company.py`/`pipeline.py`, so it's usable from a plain
+script too, not just the dashboard.
+
+**Trailing twelve months (TTM):** ratios that compare a single quarter's
+income-statement figure (net income, revenue) against a balance-sheet
+figure (equity, assets) or a stock price use the sum of the most recent 4
+quarters instead of just one quarter's figure — a single quarter is a
+3-month number, but equity/assets/price are snapshots, so comparing one
+quarter of net income to a full balance sheet understates the ratio by
+~4x. If fewer than 4 consecutive quarters of data are available (or any of
+the 4 is missing that figure), the ratio shows blank rather than a
+misleading partial sum. This is why ROE, ROA, P/E, and P/S need several
+quarters of history loaded before they'll show anything for the earliest
+quarters in the table.
+
+**Negative-earnings P/E and P/B show blank, not negative:** a "P/E of
+-12x" isn't a meaningful multiple the way a positive one is — it's just
+announcing the sign of the input — so, matching standard practice on most
+finance sites, both show as blank when TTM earnings (P/E) or book value
+per share (P/B) are negative. This is also useful here specifically: it's
+why the catalog has *both* a GAAP P/E and a non-GAAP P/E — a company with
+a GAAP net loss but positive non-GAAP earnings (Snowflake, for instance)
+will show blank for GAAP P/E and a real multiple for non-GAAP P/E, which
+is itself another view of the GAAP/non-GAAP gap.
+
+**Valuation ratios (P/E, P/S, P/B) use today's price against every
+historical quarter's TTM figures**, not the price as of that quarter —
+yfinance's free tier doesn't give a clean historical "price on this
+specific date" lookup the way it gives current/recent prices, so this is
+a known simplification: the P/E shown next to a quarter from a year ago
+reflects today's price, not the price back then. Fine for eyeballing
+whether current TTM earnings/revenue support today's price; not a
+substitute for a real historical-valuation dataset.
+
+**No Debt/Equity or EV/EBITDA.** "Total debt" isn't one clean XBRL tag —
+it's split across several inconsistent tags (current vs. noncurrent,
+secured vs. unsecured, finance leases, and more) with no reliable
+fallback list the way revenue has. Rather than guess and risk showing a
+wrong debt figure, those ratios are left out entirely (see "Known
+limitations").
 
 ## Publishing this to GitHub
 
@@ -263,6 +320,9 @@ git push -u origin main
   thing to try.
 - **Only one ticker's non-GAAP data is seeded** (SNOW). Add another
   ticker by creating `data/non_gaap/<TICKER>.json` in the same format.
+- **No Debt/Equity or EV/EBITDA ratio, and valuation ratios use today's
+  price against historical quarters.** See "How the ratio dropdown works"
+  above for both.
 
 ## Next steps (not built yet, on purpose)
 

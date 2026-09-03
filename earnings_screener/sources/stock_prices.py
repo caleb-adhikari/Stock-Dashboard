@@ -54,6 +54,30 @@ def fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame | None:
     return history[["Close"]].rename(columns={"Close": ticker.upper()})
 
 
+def fetch_latest_price(ticker: str) -> float | None:
+    """
+    Most recent closing price for `ticker` — used by the ratio catalog for
+    valuation ratios (P/E, P/S, P/B). Note this is the last CLOSE, not a
+    live intraday quote (yfinance's free tier doesn't reliably offer real-
+    time prices), so a valuation ratio computed with it reflects the most
+    recent market close, not "right now." Returns None on any failure.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    try:
+        history = yf.Ticker(ticker.upper()).history(period="5d")
+    except Exception:
+        return None
+
+    if history is None or history.empty:
+        return None
+
+    return float(history["Close"].iloc[-1])
+
+
 def combine_price_histories(prices_by_ticker: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
     Combine several single-ticker price DataFrames (as returned by

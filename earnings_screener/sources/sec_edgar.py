@@ -37,6 +37,17 @@ We handle this by:
      restate a prior quarter in a later filing), keeping the one with the
      latest `filed` date, since that's the most up-to-date figure.
 
+DURATION FACTS VS. INSTANT FACTS
+-----------------------------------
+Everything above is about "duration" facts — a total ACCUMULATED OVER a
+stretch of time (revenue "for the 3 months ended July 31"). Balance sheet
+figures (total assets, stockholders' equity, cash, ...) are a different
+kind of XBRL fact called "instant" — a snapshot AS OF one specific date
+("as of July 31"), with no meaningful start date or duration to filter on.
+_best_instant_values() below handles those separately: same restatement
+handling (keep the latest-filed value per date), but no duration check,
+since there's no duration to check.
+
 SEC's ACCESS REQUIREMENT
 --------------------------
 SEC EDGAR requires every request to send a `User-Agent` header identifying
@@ -103,6 +114,31 @@ NET_INCOME_TAGS = [
 EPS_DILUTED_TAG = "EarningsPerShareDiluted"
 DILUTED_SHARES_TAG = "WeightedAverageNumberOfDilutedSharesOutstanding"
 STOCK_COMP_TAG = "ShareBasedCompensation"
+
+# More duration facts (same "list of candidates, first with data wins"
+# pattern as revenue/net income), needed for margin ratios.
+GROSS_PROFIT_TAGS = ["GrossProfit"]
+OPERATING_INCOME_TAGS = ["OperatingIncomeLoss"]
+
+# Balance sheet tags — these are INSTANT facts (see module docstring), used
+# for ROE/ROA, current ratio, and P/B. Deliberately NOT including any kind
+# of "total debt" tag here: unlike the figures above, debt is reported
+# across several inconsistent tags (current vs. noncurrent, secured vs.
+# unsecured, finance leases, ...) with no one standard tag to fall back
+# through the way revenue has — see README "Known limitations" for why
+# Debt/Equity and EV/EBITDA aren't included in the ratio catalog yet.
+ASSETS_TAGS = ["Assets"]
+LIABILITIES_TAGS = ["Liabilities"]
+EQUITY_TAGS = [
+    "StockholdersEquity",
+    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+]
+CURRENT_ASSETS_TAGS = ["AssetsCurrent"]
+CURRENT_LIABILITIES_TAGS = ["LiabilitiesCurrent"]
+CASH_TAGS = [
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+]
 
 
 class SecEdgarClient:
@@ -190,22 +226,51 @@ class SecEdgarClient:
                 best_by_end[end] = entry
         return best_by_end
 
-    def _best_quarterly_values_from_tags(self, cik: int, tag_candidates: list[str]) -> dict:
+    def _best_instant_values(self, concept_json: dict) -> dict:
         """
-        Try each tag in `tag_candidates`, in order, and return the quarterly
-        values (see _best_quarterly_values) from the first one that actually
-        has data for this company. Returns {} if none of them do — the
-        caller decides whether that's an error (revenue, since we can't
-        build anything without it) or just a missing optional field (stock
-        comp, diluted shares).
+        Like _best_quarterly_values, but for INSTANT facts (a snapshot as of
+        one date — total assets, stockholders' equity, cash — rather than a
+        total accumulated over a period). No duration to filter on here;
+        we just keep the latest-filed value per "end" date, restricted to
+        10-Q filings so a balance sheet snapshot lines up with the same
+        quarter-end dates our duration facts (revenue, etc.) use.
+        """
+        units = concept_json.get("units", {})
+        entries = units.get("USD") or []
+
+        best_by_end: dict[str, dict] = {}
+        for entry in entries:
+            if entry.get("form") != "10-Q":
+                continue
+            end = entry.get("end")
+            if not end:
+                continue
+            current_best = best_by_end.get(end)
+            if current_best is None or entry.get("filed", "") > current_best.get("filed", ""):
+                best_by_end[end] = entry
+        return best_by_end
+
+    def _best_values_from_tags(self, cik: int, tag_candidates: list[str], parser) -> dict:
+        """
+        Try each tag in `tag_candidates`, in order, running `parser` (either
+        _best_quarterly_values or _best_instant_values) on the first one
+        that actually has data for this company. Returns {} if none do —
+        the caller decides whether that's an error (revenue, since we can't
+        build anything without it) or just a missing optional field.
         """
         for tag in tag_candidates:
             concept = self.get_company_concept(cik, tag)
             if concept:
-                values = self._best_quarterly_values(concept)
+                values = parser(concept)
                 if values:
                     return values
         return {}
+
+    def _best_quarterly_values_from_tags(self, cik: int, tag_candidates: list[str]) -> dict:
+        return self._best_values_from_tags(cik, tag_candidates, self._best_quarterly_values)
+
+    def _best_instant_values_from_tags(self, cik: int, tag_candidates: list[str]) -> dict:
+        return self._best_values_from_tags(cik, tag_candidates, self._best_instant_values)
 
     # -- public: build GaapQuarter objects ---------------------------------
 
@@ -233,6 +298,8 @@ class SecEdgarClient:
             )
 
         net_income_by_end = self._best_quarterly_values_from_tags(cik, NET_INCOME_TAGS)
+        gross_profit_by_end = self._best_quarterly_values_from_tags(cik, GROSS_PROFIT_TAGS)
+        operating_income_by_end = self._best_quarterly_values_from_tags(cik, OPERATING_INCOME_TAGS)
 
         eps_concept = self.get_company_concept(cik, EPS_DILUTED_TAG)
         eps_by_end = self._best_quarterly_values(eps_concept) if eps_concept else {}
@@ -243,15 +310,31 @@ class SecEdgarClient:
         sbc_concept = self.get_company_concept(cik, STOCK_COMP_TAG)
         sbc_by_end = self._best_quarterly_values(sbc_concept) if sbc_concept else {}
 
+        # Balance sheet (instant facts) — see _best_instant_values' docstring.
+        assets_by_end = self._best_instant_values_from_tags(cik, ASSETS_TAGS)
+        liabilities_by_end = self._best_instant_values_from_tags(cik, LIABILITIES_TAGS)
+        equity_by_end = self._best_instant_values_from_tags(cik, EQUITY_TAGS)
+        current_assets_by_end = self._best_instant_values_from_tags(cik, CURRENT_ASSETS_TAGS)
+        current_liabilities_by_end = self._best_instant_values_from_tags(cik, CURRENT_LIABILITIES_TAGS)
+        cash_by_end = self._best_instant_values_from_tags(cik, CASH_TAGS)
+
         # Revenue is the anchor: build one GaapQuarter per period-end we
         # have a revenue figure for, and pull in the other tags if present.
         quarters: list[GaapQuarter] = []
         for end, rev_entry in revenue_by_end.items():
             key = QuarterKey(fiscal_year=rev_entry["fy"], fiscal_period=rev_entry["fp"])
             ni_entry = net_income_by_end.get(end)
+            gp_entry = gross_profit_by_end.get(end)
+            oi_entry = operating_income_by_end.get(end)
             eps_entry = eps_by_end.get(end)
             shares_entry = shares_by_end.get(end)
             sbc_entry = sbc_by_end.get(end)
+            assets_entry = assets_by_end.get(end)
+            liabilities_entry = liabilities_by_end.get(end)
+            equity_entry = equity_by_end.get(end)
+            current_assets_entry = current_assets_by_end.get(end)
+            current_liabilities_entry = current_liabilities_by_end.get(end)
+            cash_entry = cash_by_end.get(end)
 
             quarters.append(
                 GaapQuarter(
@@ -260,10 +343,18 @@ class SecEdgarClient:
                     period_start=rev_entry["start"],
                     period_end=end,
                     revenue=rev_entry.get("val"),
+                    gross_profit=gp_entry.get("val") if gp_entry else None,
+                    operating_income=oi_entry.get("val") if oi_entry else None,
                     net_income=ni_entry.get("val") if ni_entry else None,
                     eps_diluted=eps_entry.get("val") if eps_entry else None,
                     diluted_shares=shares_entry.get("val") if shares_entry else None,
                     stock_based_comp=sbc_entry.get("val") if sbc_entry else None,
+                    total_assets=assets_entry.get("val") if assets_entry else None,
+                    total_liabilities=liabilities_entry.get("val") if liabilities_entry else None,
+                    stockholders_equity=equity_entry.get("val") if equity_entry else None,
+                    current_assets=current_assets_entry.get("val") if current_assets_entry else None,
+                    current_liabilities=current_liabilities_entry.get("val") if current_liabilities_entry else None,
+                    cash=cash_entry.get("val") if cash_entry else None,
                     source_accession=rev_entry.get("accn"),
                     filed_date=rev_entry.get("filed"),
                 )
