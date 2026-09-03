@@ -54,7 +54,8 @@ def get_comparisons_for_ticker(ticker: str, email: str, quarters: int = 8) -> Fe
         gaap_quarters = client.fetch_quarterly_gaap(ticker, max_quarters=quarters)
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         # ValueError covers "could not resolve CIK for ticker" (typo'd or
-        # unlisted ticker) as well as network errors from urllib.
+        # unlisted ticker) and "no revenue tag matched" (e.g. banks/insurers/
+        # REITs — see sec_edgar.py), alongside network errors from urllib.
         gaap_fetch_error = str(exc)
 
     comparisons = build_comparisons(gaap_quarters, non_gaap_quarters)

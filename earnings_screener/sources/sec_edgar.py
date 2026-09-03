@@ -67,18 +67,39 @@ KNOWN_CIKS = {
     "AAPL": 320193,  # Apple Inc. (used for testing/sanity-checks)
 }
 
-# The XBRL tags we pull for the GAAP side of the comparison. Revenue tag
-# varies a bit by company/era; we try each in order and use the first one
-# that returns data. Stock-based comp is included because it's usually the
-# single biggest driver of the GAAP/non-GAAP gap for software companies —
-# even though we don't use it in a formula yet, having it on the object
-# already means the "why is the gap big" feature later is just a report
-# change, not a new data-fetching project.
+# The XBRL tags we pull for the GAAP side of the comparison. Several
+# concepts (revenue especially) don't have one universal tag — companies
+# choose from a handful of standard options depending on when they adopted
+# the current revenue-recognition rules (ASC 606) and how their business
+# is structured, and older filings may use a tag a company has since moved
+# away from (we confirmed this directly: Microsoft's own "Revenues" tag
+# data stops in 2011 — they moved to a different tag afterward). So, same
+# idea as before, each concept below is a LIST tried in order, and we use
+# the first one that actually has data for this company.
+#
+# This still won't cover every industry: banks, insurers, and REITs
+# structure their income statements fundamentally differently (e.g. a
+# bank's "revenue" is really net interest income + fee income, not a
+# single sales-style figure) and use entirely different tag sets that
+# aren't in this list. fetch_quarterly_gaap() raises a clear error naming
+# the ticker and the tags it tried when NONE of them have data, rather
+# than silently returning nothing, specifically so a ticker like that is
+# obvious instead of confusing — see README "Known limitations."
 REVENUE_TAGS = [
-    "RevenueFromContractWithCustomerExcludingAssessedTax",  # common for modern SaaS filers (ASC 606)
-    "Revenues",  # older/simpler tag, still used by many companies
+    "RevenueFromContractWithCustomerExcludingAssessedTax",  # common for modern filers (ASC 606), excl. sales tax
+    "RevenueFromContractWithCustomerIncludingAssessedTax",  # same rules, but revenue reported inclusive of sales tax
+    "Revenues",  # older/generic tag, still used by many companies
+    "SalesRevenueNet",  # older tag, common in filings from before ~2018
 ]
-NET_INCOME_TAG = "NetIncomeLoss"
+NET_INCOME_TAGS = [
+    "NetIncomeLoss",  # near-universal for US GAAP filers
+    "ProfitLoss",  # occasionally used instead, e.g. by some foreign private issuers
+]
+# Stock-based comp is included because it's usually the single biggest
+# driver of the GAAP/non-GAAP gap for software companies — even though we
+# don't use it in a formula yet, having it on the object already means the
+# "why is the gap big" feature later is just a report change, not a new
+# data-fetching project.
 EPS_DILUTED_TAG = "EarningsPerShareDiluted"
 DILUTED_SHARES_TAG = "WeightedAverageNumberOfDilutedSharesOutstanding"
 STOCK_COMP_TAG = "ShareBasedCompensation"
@@ -169,25 +190,49 @@ class SecEdgarClient:
                 best_by_end[end] = entry
         return best_by_end
 
+    def _best_quarterly_values_from_tags(self, cik: int, tag_candidates: list[str]) -> dict:
+        """
+        Try each tag in `tag_candidates`, in order, and return the quarterly
+        values (see _best_quarterly_values) from the first one that actually
+        has data for this company. Returns {} if none of them do — the
+        caller decides whether that's an error (revenue, since we can't
+        build anything without it) or just a missing optional field (stock
+        comp, diluted shares).
+        """
+        for tag in tag_candidates:
+            concept = self.get_company_concept(cik, tag)
+            if concept:
+                values = self._best_quarterly_values(concept)
+                if values:
+                    return values
+        return {}
+
     # -- public: build GaapQuarter objects ---------------------------------
 
     def fetch_quarterly_gaap(self, ticker: str, max_quarters: int = 8) -> list[GaapQuarter]:
         """
         Fetch and assemble the last `max_quarters` quarters of GAAP figures
         for `ticker`, one GaapQuarter per fiscal quarter, newest first.
+
+        Raises ValueError if none of REVENUE_TAGS have any data for this
+        company — that's usually a sign it's in an industry (bank, insurer,
+        REIT) whose financial statements don't use these tags at all, or a
+        ticker so new/obscure it hasn't filed a 10-Q yet. Everything else
+        (net income, EPS, shares, stock comp) degrades to missing fields on
+        the GaapQuarter objects instead, since revenue is the one thing this
+        whole pipeline is built around.
         """
         cik = self.resolve_cik(ticker)
 
-        revenue_by_end = {}
-        for tag in REVENUE_TAGS:
-            concept = self.get_company_concept(cik, tag)
-            if concept:
-                revenue_by_end = self._best_quarterly_values(concept)
-                if revenue_by_end:
-                    break
+        revenue_by_end = self._best_quarterly_values_from_tags(cik, REVENUE_TAGS)
+        if not revenue_by_end:
+            raise ValueError(
+                f"No revenue data found for {ticker.upper()} under any of the tags this tool checks "
+                f"({', '.join(REVENUE_TAGS)}). This usually means the company reports under a different "
+                f"tag set entirely (common for banks, insurers, and REITs) — see README 'Known limitations'."
+            )
 
-        net_income_concept = self.get_company_concept(cik, NET_INCOME_TAG)
-        net_income_by_end = self._best_quarterly_values(net_income_concept) if net_income_concept else {}
+        net_income_by_end = self._best_quarterly_values_from_tags(cik, NET_INCOME_TAGS)
 
         eps_concept = self.get_company_concept(cik, EPS_DILUTED_TAG)
         eps_by_end = self._best_quarterly_values(eps_concept) if eps_concept else {}

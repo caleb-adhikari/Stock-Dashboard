@@ -99,9 +99,12 @@ https://data.sec.gov/api/xbrl/companyconcept/CIK{10-digit-cik}/us-gaap/{TAG}.jso
 ```
 
 `sec_edgar.py` fetches a handful of tags (revenue, net income, diluted
-EPS, diluted share count, stock-based comp) for any ticker (it resolves
-ticker → CIK itself, with SNOW/AAPL cached and everything else looked up
-live) and assembles them into one `GaapQuarter` per fiscal quarter.
+EPS, diluted share count, stock-based comp) for **any ticker** — it
+resolves ticker → CIK itself (SNOW/AAPL cached, everything else looked up
+live against SEC's own ticker list) and assembles them into one
+`GaapQuarter` per fiscal quarter. This isn't SNOW-specific anywhere in the
+code; SNOW is just the one ticker with non-GAAP data seeded so far (see
+below).
 
 **The gotcha:** each tag's JSON mixes together quarterly, six/nine-month
 year-to-date, and full-year figures — and can contain restated values from
@@ -110,6 +113,22 @@ date range is 80-100 days (a single quarter) and, when a period appears
 more than once, keeps the one with the latest `filed` date. This logic is
 covered by `tests/test_sec_edgar_parsing.py` using a fixture built from
 real SNOW data confirmed live against the API while building this.
+
+**The other gotcha: there's no single universal revenue tag.** Companies
+choose from a handful of standard XBRL tags depending on when they adopted
+current revenue-recognition rules, and some have switched tags entirely
+over their history (we confirmed this directly: Microsoft's own
+`Revenues` tag data just stops in 2011 — they moved to a different tag
+after that). `REVENUE_TAGS` (and `NET_INCOME_TAGS`) in `sec_edgar.py` are
+lists tried in order, using the first one that actually has data for that
+company. If literally none of them match, `fetch_quarterly_gaap` raises a
+clear error naming the ticker and every tag it tried, instead of quietly
+returning nothing — this shows up as a "couldn't fetch GAAP data" warning
+in the CLI/dashboard rather than a silent blank. That mainly happens for
+banks, insurers, and REITs, whose financial statements are structured
+differently (a bank's "revenue" is really net interest income plus fee
+income, not one sales-style line) and use a different tag set this tool
+doesn't try — see "Known limitations."
 
 ## How the non-GAAP side works
 
@@ -214,6 +233,13 @@ git push -u origin main
 
 ## Known limitations
 
+- **Banks, insurers, and REITs generally won't work.** Their financial
+  statements don't use the revenue/net-income tags this tool checks (see
+  "How the GAAP side works" above) because their business models don't
+  produce a single sales-style revenue line. You'll get a clear "no
+  revenue data found" error rather than wrong numbers, but not a working
+  comparison. Everything else (tech, retail, consumer, industrials, etc.)
+  is fair game for any ticker.
 - **Q4 isn't derived.** SEC filings report Q1-Q3 as discrete quarters but
   the "fourth quarter" only shows up as part of the full-year 10-K figure.
   Getting a true Q4 means subtracting Q1+Q2+Q3 from the full year — not

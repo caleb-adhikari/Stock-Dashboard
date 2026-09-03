@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from earnings_screener.sources.sec_edgar import SecEdgarClient
+from earnings_screener.sources.sec_edgar import REVENUE_TAGS, SecEdgarClient
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "snow_eps_diluted_sample.json"
 
@@ -67,9 +67,52 @@ def test_single_quarter_duration_check():
     assert client._is_single_quarter({"start": "2025-02-01", "end": "2026-01-31"}) is False  # full year
 
 
+def test_tag_fallback_skips_tags_with_no_data():
+    """Revenue (and net income) tags vary by company — this proves the
+    "try each tag in order, use the first with data" fallback actually
+    falls through past a tag that returns nothing, rather than giving up."""
+    client = SecEdgarClient(contact_email="test@example.com")
+    concept = load_fixture()  # has real quarterly data, just under whatever tag we pretend it is
+
+    calls = []
+
+    def fake_get_company_concept(cik, tag):
+        calls.append(tag)
+        if tag == "FirstTagWithNoData":
+            return None
+        if tag == "SecondTagWithData":
+            return concept
+        raise AssertionError(f"should not have tried tag {tag!r} after finding data")
+
+    client.get_company_concept = fake_get_company_concept
+    values = client._best_quarterly_values_from_tags(cik=1234, tag_candidates=["FirstTagWithNoData", "SecondTagWithData", "ThirdTagNeverTried"])
+
+    assert calls == ["FirstTagWithNoData", "SecondTagWithData"], f"stopped at the wrong tag: {calls}"
+    assert len(values) > 0
+
+
+def test_fetch_quarterly_gaap_raises_clear_error_when_no_revenue_tag_matches():
+    """If a ticker's financials don't use ANY of our known revenue tags
+    (e.g. a bank), this should fail loudly and specifically — not silently
+    return an empty list that looks like "no data exists at all"."""
+    client = SecEdgarClient(contact_email="test@example.com")
+    client.get_company_concept = lambda cik, tag: None  # simulate: nothing matches, ever
+
+    try:
+        client.fetch_quarterly_gaap("SNOW")  # SNOW is in KNOWN_CIKS, so this needs no network to resolve
+        raise AssertionError("expected a ValueError")
+    except ValueError as exc:
+        message = str(exc)
+        assert "SNOW" in message
+        for tag in REVENUE_TAGS:
+            assert tag in message, f"expected the error to name tried tag {tag!r}"
+
+
 if __name__ == "__main__":
     # Allow running without pytest installed.
     test_filters_out_ytd_entries_and_keeps_quarters()
     test_prefers_most_recently_filed_value_on_restatement()
     test_single_quarter_duration_check()
+    test_tag_fallback_skips_tags_with_no_data()
+    test_fetch_quarterly_gaap_raises_clear_error_when_no_revenue_tag_matches()
     print("All offline parsing tests passed.")
